@@ -69,6 +69,9 @@ for e in employes:
         # Congés validés
         if (date_debut + timedelta(days=d)) in conges_dict[e]:
             model.Add(shifts[(e,d,"Conge")] == 1)
+        else:
+             model.Add(shifts[(e,d,"Conge")] == 0) # Ensure it's not a holiday if not in the list
+
 
 # Shift court max 1 par employé sur 6 semaines
 for e in employes:
@@ -92,18 +95,25 @@ for d in range(periode_jours):
 # -------------------
 for e in employes:
     for d in range(periode_jours-1):
-        # Repos après nuit
-        model.Add(shifts[(e,d+1,"Repos")] == 1).OnlyEnforceIf(shifts[(e,d,"Nuit")])
+        # Repos après nuit: If employee works a night shift on day d, they must have Repos on day d+1
+        model.AddImplication(shifts[(e,d,"Nuit")], shifts[(e,d+1,"Repos")])
 
-# 2 jours consécutifs de repos par semaine
-for week_start in range(0, periode_jours, 7):
-    week_days = range(week_start, min(week_start+7, periode_jours))
-    pairs = []
-    for i in range(len(week_days)-1):
-        pair_var = model.NewBoolVar(f"{e}_repos_pair_{week_days[i]}")
-        model.AddBoolAnd([shifts[(e,week_days[i],"Repos")], shifts[(e,week_days[i+1],"Repos")]]).OnlyEnforceIf(pair_var)
-        pairs.append(pair_var)
-    model.AddBoolOr(pairs)
+    # 2 jours consécutifs de repos par semaine: For each 7-day window, there must be at least one block of 2 consecutive Repos days.
+    for week_start in range(0, periode_jours, 7):
+        week_end = min(week_start + 7, periode_jours)
+        # Create a list of Boolean variables representing if a 2-day repos block starts on each day of the week
+        two_day_repos_starts = []
+        for d in range(week_start, week_end - 1): # Need at least 2 days remaining
+            # This variable is true if day d and day d+1 are Repos
+            is_two_day_repos = model.NewBoolVar(f'{e}_two_day_repos_start_{d}')
+            model.AddBoolOr([shifts[(e,d,"Repos")].Not(), shifts[(e,d+1,"Repos")].Not()]).OnlyEnforceIf(is_two_day_repos.Not())
+            model.AddBoolAnd([shifts[(e,d,"Repos")], shifts[(e,d+1,"Repos")]]).OnlyEnforceIf(is_two_day_repos)
+            two_day_repos_starts.append(is_two_day_repos)
+
+        # At least one two-day repos block must occur in the 7-day window
+        if two_day_repos_starts: # Only add constraint if there are at least 2 days in the window
+             model.AddBoolOr(two_day_repos_starts)
+
 
 # -------------------
 # HEURES PAR EMPLOYÉ
