@@ -1,248 +1,126 @@
-import streamlit as st
-
 import pandas as pd
 
-import datetime
+st.markdown("---")
 
-from ortools.sat.python import cp_model
+st.header("📊 Suivi et analyse du planning")
 
-# ---------------------------
+# Bouton pour lever la contrainte des 210h
 
-# PARAMÈTRES DE BASE
+if "force_mode" not in st.session_state:
 
-# ---------------------------
+    st.session_state.force_mode = False
 
-SHIFT_TYPES = {
+if st.button("🔓 Lever la contrainte 210h (mode 'À attribuer')"):
 
-    "day_week": {"label": "Jour semaine", "hours": 11.25, "color": "#a8dadc"},
+    st.session_state.force_mode = not st.session_state.force_mode
 
-    "short_day": {"label": "Jour court", "hours": 7.5, "color": "#457b9d"},
+if st.session_state.force_mode:
 
-    "day_weekend": {"label": "Jour week-end", "hours": 11.25, "color": "#1d3557"},
+    st.info("⚠️ La contrainte stricte de 210h est désactivée. Les heures manquantes seront marquées comme 'À attribuer'.")
 
-    "night_week": {"label": "Nuit semaine", "hours": 11.25, "color": "#f4a261"},
+else:
 
-    "night_weekend": {"label": "Nuit week-end", "hours": 11.25, "color": "#e76f51"},
+    st.success("✅ La contrainte stricte de 210h est active. Chaque employé doit atteindre exactement 210h.")
 
-    "rest": {"label": "Repos", "hours": 0, "color": "#f1faee"},
+# ---- 1. Tableau récap heures par employé ----
 
-    "leave": {"label": "Congés validés", "hours": 11.25, "color": "#e63946"},
+recap_data = []
 
-    "to_assign": {"label": "À attribuer", "hours": 11.25, "color": "#ffbe0b"}
+for emp in employees:
 
-}
+    worked_hours = hours_by_employee.get(emp, 0)
 
-# ---------------------------
+    leave_hours = leave_hours_by_employee.get(emp, 0) if 'leave_hours_by_employee' in globals() else 0
 
-# INTERFACE STREAMLIT
+    total_hours = worked_hours + leave_hours
 
-# ---------------------------
+    diff_210 = total_hours - 210
 
-st.title("📅 Planification automatique des horaires cliniques")
+    recap_data.append({
 
-employees = st.text_area("Liste des employés (1 par ligne)").splitlines()
+        "Employé": emp,
 
-employees = [e.strip() for e in employees if e.strip()]
+        "Heures travaillées": worked_hours,
 
-start_date = st.date_input("Date de début", datetime.date(2025, 11, 2))
+        "Heures de congés validés": leave_hours,
 
-num_weeks = st.number_input("Durée de la période (en semaines)", 2, 12, 6)
+        "Total heures comptées": total_hours,
 
-num_days = num_weeks * 7
+        "Écart vs 210h": diff_210
 
-strict_210 = st.checkbox("🔒 Appliquer strictement les 210h par employé", value=True)
+    })
 
-st.subheader("🛫 Congés validés")
+df_recap = pd.DataFrame(recap_data)
 
-leave_input = st.text_area("Saisir (format: Employé, YYYY-MM-DD, YYYY-MM-DD)")
+st.subheader("📅 Heures par employé")
 
-leave_periods = []
+st.dataframe(df_recap, use_container_width=True)
 
-for line in leave_input.splitlines():
+# ---- 2. Tableau récap par type de shift ----
 
-    parts = [p.strip() for p in line.split(",")]
+shift_summary = []
 
-    if len(parts) == 3 and parts[0] in employees:
+for emp in employees:
 
-        emp, d1, d2 = parts
+    summary = {
 
-        d1 = datetime.date.fromisoformat(d1)
+        "Employé": emp,
 
-        d2 = datetime.date.fromisoformat(d2)
+        "Nuits semaine (lun–jeu)": shift_count[emp]["night_week"] if emp in shift_count else 0,
 
-        leave_periods.append((emp, d1, d2))
+        "Nuits week-end (ven–dim)": shift_count[emp]["night_weekend"] if emp in shift_count else 0,
 
-# ---------------------------
+        "Jours semaine (lun–ven)": shift_count[emp]["day_week"] if emp in shift_count else 0,
 
-# BOUTON DE CALCUL
+        "Jours week-end (sam–dim)": shift_count[emp]["day_weekend"] if emp in shift_count else 0,
 
-# ---------------------------
+        "Journées courtes": shift_count[emp]["short_day"] if emp in shift_count else 0,
 
-if st.button("🚀 Générer le planning"):
+    }
 
-    model = cp_model.CpModel()
+    shift_summary.append(summary)
 
-    all_days = [start_date + datetime.timedelta(days=i) for i in range(num_days)]
+df_shifts = pd.DataFrame(shift_summary)
 
-    shifts = {}
+st.subheader("⚖️ Répartition des shifts par type")
 
-    # Variables
+st.dataframe(df_shifts, use_container_width=True)
 
-    for e in employees:
+# ---- 3. Tableau des blocages ----
 
-        for d in all_days:
+logs = []
 
-            for s in SHIFT_TYPES.keys():
+for emp in employees:
 
-                shifts[e, d, s] = model.NewBoolVar(f"{e}_{d}_{s}")
+    reasons = []
 
-    # Chaque employé = 1 shift par jour
+    if df_recap.loc[df_recap["Employé"] == emp, "Écart vs 210h"].values[0] < 0:
 
-    for e in employees:
+        reasons.append("Manque d'heures planifiées")
 
-        for d in all_days:
+    if emp in unavailable_conflicts:  # dictionnaire que tu remplis pendant la planif
 
-            model.Add(sum(shifts[e, d, s] for s in SHIFT_TYPES.keys()) == 1)
+        reasons.append("Indisponibilité saisie")
 
-    # Congés validés forcés
+    if emp in rest_conflicts:  # idem
 
-    for emp, d1, d2 in leave_periods:
+        reasons.append("Repos obligatoire non respecté")
 
-        for d in all_days:
+    if emp in quota_conflicts:  # idem
 
-            if d1 <= d <= d2:
+        reasons.append("Quota min/max déjà atteint")
 
-                for s in SHIFT_TYPES:
+    if not reasons:
 
-                    if s != "leave":
+        reasons.append("Aucun blocage")
 
-                        model.Add(shifts[emp, d, s] == 0)
+    logs.append({"Employé": emp, "Blocages identifiés": ", ".join(reasons)})
 
-                model.Add(shifts[emp, d, "leave"] == 1)
+df_logs = pd.DataFrame(logs)
 
-    # Couverture journalière
+st.subheader("🛑 Blocages et contraintes")
 
-    for d in all_days:
-
-        weekday = d.weekday()
-
-        if weekday < 5:  # semaine
-
-            model.Add(sum(shifts[e, d, "day_week"] + shifts[e, d, "short_day"] for e in employees) >= 4)
-
-            model.Add(sum(shifts[e, d, "day_week"] + shifts[e, d, "short_day"] for e in employees) <= 7)
-
-            model.Add(sum(shifts[e, d, "night_week"] for e in employees) == 2)
-
-        else:  # week-end
-
-            model.Add(sum(shifts[e, d, "day_weekend"] for e in employees) == 2)
-
-            model.Add(sum(shifts[e, d, "night_weekend"] for e in employees) == 2)
-
-    # Règles de repos et enchaînements
-
-    for e in employees:
-
-        for i, d in enumerate(all_days[:-1]):
-
-            next_d = all_days[i+1]
-
-            # Pas de jour après nuit
-
-            model.Add(shifts[e, d, "night_week"] + shifts[e, d, "night_weekend"] + shifts[e, next_d, "day_week"] <= 1)
-
-            # Pas plus de 3 shifts d'affilée
-
-            if i < len(all_days)-3:
-
-                model.Add(sum(shifts[e, all_days[i+k], s] 
-
-                              for k in range(4) for s in ["day_week","short_day","day_weekend","night_week","night_weekend"]) <= 3)
-
-    # Week-end blocs (2 jours jour, 3 nuits nuit)
-
-    for e in employees:
-
-        for i, d in enumerate(all_days):
-
-            if d.weekday() == 5:  # samedi
-
-                # si jour samedi alors jour dimanche
-
-                model.Add(shifts[e, d, "day_weekend"] == shifts[e, d+datetime.timedelta(days=1), "day_weekend"])
-
-            if d.weekday() == 4:  # vendredi
-
-                # si nuit vendredi → nuit samedi + nuit dimanche
-
-                model.Add(shifts[e, d, "night_weekend"] <= shifts[e, d+datetime.timedelta(days=1), "night_weekend"])
-
-                model.Add(shifts[e, d, "night_weekend"] <= shifts[e, d+datetime.timedelta(days=2), "night_weekend"])
-
-    # 210h strictes
-
-    for e in employees:
-
-        total_hours = sum(shifts[e, d, s] * SHIFT_TYPES[s]["hours"] for d in all_days for s in SHIFT_TYPES)
-
-        if strict_210:
-
-            model.Add(total_hours == 210)
-
-        else:
-
-            model.Add(total_hours <= 210)
-
-    # Solve
-
-    solver = cp_model.CpSolver()
-
-    solver.parameters.max_time_in_seconds = 60
-
-    status = solver.Solve(model)
-
-    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-
-        df = pd.DataFrame(index=employees, columns=[f"{d.strftime('%a %d/%m')}" for d in all_days])
-
-        hours_summary = {e: 0 for e in employees}
-
-        shifts_summary = {e: {s:0 for s in SHIFT_TYPES} for e in employees}
-
-        for e in employees:
-
-            for d in all_days:
-
-                for s in SHIFT_TYPES:
-
-                    if solver.Value(shifts[e, d, s]) == 1:
-
-                        df.loc[e, f"{d.strftime('%a %d/%m')}"] = SHIFT_TYPES[s]["label"]
-
-                        hours_summary[e] += SHIFT_TYPES[s]["hours"]
-
-                        shifts_summary[e][s] += 1
-
-        # Affichage planning
-
-        st.subheader("📅 Planning")
-
-        st.dataframe(df)
-
-        # Heures par employé
-
-        st.subheader("⏱️ Heures totales")
-
-        st.table(pd.DataFrame.from_dict(hours_summary, orient="index", columns=["Heures"]))
-
-        # Répartition shifts
-
-        st.subheader("⚖️ Répartition des shifts")
-
-        st.dataframe(pd.DataFrame(shifts_summary).T)
-
-    else:
-
-        st.error("⚠️ Aucune solution trouvée. Consultez vos contraintes ou levez 210h strictes.")
+st.dataframe(df_logs, use_container_width=True)
+ST.info - Premium Information Domain for Sale
+Discover the exceptional value of ST.info - a premium domain perfect for information services, technology platforms, and professional businesses seeking instant credibility and brand recognition.
  
