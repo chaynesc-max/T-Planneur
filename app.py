@@ -112,15 +112,15 @@ for week_start in range(0, periode_jours, 7):
 scale_factor = 4
 
 for e in employes:
-    heures_scaled = sum(
+    total_heures_scaled = sum(
         int(11.25 * scale_factor)*(shifts[(e,d,"Jour")] + shifts[(e,d,"Nuit")] + shifts[(e,d,"Conge")]) +
         int(7.5 * scale_factor)*shifts[(e,d,"Jour_court")]
         for d in range(periode_jours)
     )
     if not leve_210h:
-        model.Add(heures_scaled == int(210 * scale_factor))
+        model.Add(total_heures_scaled == int(210 * scale_factor))
     else:
-        model.Add(heures_scaled <= int(210 * scale_factor))
+        model.Add(total_heures_scaled <= int(210 * scale_factor))
 
 
 # -------------------
@@ -153,14 +153,20 @@ else:
 # -------------------
 # LOG DES CONTRAINTES BLOQUANTES
 # -------------------
-for e in employes:
-    total = sum(
-        11.25*(solver.Value(shifts[(e,d,"Jour")]) + solver.Value(shifts[(e,d,"Nuit")]) + solver.Value(shifts[(e,d,"Conge")])) +
-        7.5*solver.Value(shifts[(e,d,"Jour_court")])
-        for d in range(periode_jours)
-    )
-    if not leve_210h and total != 210:
-        log.append([e, total, "Total d'heures != 210h"])
+if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+    for e in employes:
+        # Recalculate total hours based on solver's solution
+        total_heures_solved = sum(
+            11.25 * (solver.Value(shifts[(e,d,"Jour")]) + solver.Value(shifts[(e,d,"Nuit")]) + solver.Value(shifts[(e,d,"Conge")])) +
+            7.5 * solver.Value(shifts[(e,d,"Jour_court")])
+            for d in range(periode_jours)
+        )
+        if not leve_210h and total_heures_solved != 210:
+            log.append([e, total_heures_solved, "Total d'heures != 210h"])
+        # Add check for <= 210 when leve_210h is True
+        if leve_210h and total_heures_solved > 210:
+             log.append([e, total_heures_solved, "Total d'heures > 210h malgré l'option levée"])
+
 
 if log:
     st.subheader("⚠️ Contraintes bloquantes détectées")
