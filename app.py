@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from ortools.sat.python import cp_model
-import locale
+# import locale # Removed as it caused an error
 
 st.set_page_config(layout="wide")
 st.title("📅 Générateur de Planning 6 Semaines - Version Finale avec Repos Réels")
@@ -17,8 +17,14 @@ periode_jours = 42 # 6 semaines
 
 employes = [f"Employé {i+1}" for i in range(nb_employes)]
 dates = [date_debut + timedelta(days=i) for i in range(periode_jours)]
-locale.setlocale(locale.LC_TIME, 'fr_CA.UTF-8')
-jours_str = [(d.strftime("%Y-%m-%d") + " (" + d.strftime("%a") + ")") for d in dates]
+# locale.setlocale(locale.LC_TIME, 'fr_CA.UTF-8') # Removed as it caused an error
+# Mapping for English weekday abbreviations to French
+french_weekdays = {
+    'Mon': 'lun', 'Tue': 'mar', 'Wed': 'mer', 'Thu': 'jeu',
+    'Fri': 'ven', 'Sat': 'sam', 'Sun': 'dim'
+}
+jours_str = [(d.strftime("%Y-%m-%d") + " (" + french_weekdays[d.strftime("%a")] + ")") for d in dates]
+
 
 # -------------------
 # CONGÉS VALIDÉS
@@ -102,16 +108,20 @@ for week_start in range(0, periode_jours, 7):
 # -------------------
 # HEURES PAR EMPLOYÉ
 # -------------------
+# Facteur de mise à l'échelle pour les heures (multiplier par 4 pour convertir 11.25 et 7.5 en entiers)
+scale_factor = 4
+
 for e in employes:
-    total_heures = sum(
-        11.25*(shifts[(e,d,"Jour")] + shifts[(e,d,"Nuit")] + shifts[(e,d,"Conge")]) +
-        7.5*shifts[(e,d,"Jour_court")]
+    heures_scaled = sum(
+        int(11.25 * scale_factor)*(shifts[(e,d,"Jour")] + shifts[(e,d,"Nuit")] + shifts[(e,d,"Conge")]) +
+        int(7.5 * scale_factor)*shifts[(e,d,"Jour_court")]
         for d in range(periode_jours)
     )
     if not leve_210h:
-        model.Add(total_heures == 210)
+        model.Add(heures_scaled == int(210 * scale_factor))
     else:
-        model.Add(total_heures <= 210)
+        model.Add(heures_scaled <= int(210 * scale_factor))
+
 
 # -------------------
 # SOLVEUR
