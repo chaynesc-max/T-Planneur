@@ -3,7 +3,7 @@ import pandas as pd
 import datetime
 from ortools.sat.python import cp_model
 # ---------------------------
-# PARAMÈTRES DE BASE
+# DÉFINITION DES TYPES DE SHIFTS
 # ---------------------------
 SHIFT_TYPES = {
    "day_week": {"label": "Jour semaine", "hours": 11.25, "color": "#a8dadc"},
@@ -16,19 +16,22 @@ SHIFT_TYPES = {
    "to_assign": {"label": "À attribuer", "hours": 11.25, "color": "#ffbe0b"}
 }
 # ---------------------------
-# INTERFACE STREAMLIT
+# SIDEBAR PARAMÈTRES
 # ---------------------------
-st.title("📅 Planning automatique des horaires cliniques")
-# Employés et période
-employees = st.text_area("Liste des employés (1 par ligne)").splitlines()
-employees = [e.strip() for e in employees if e.strip()]
-start_date = st.date_input("Date de début", datetime.date(2025, 11, 2))
-num_weeks = st.number_input("Durée de la période (en semaines)", 2, 12, 6)
-num_days = num_weeks * 7
-strict_210 = st.checkbox("🔒 Appliquer strictement les 210h par employé", value=True)
-# Congés validés
+st.sidebar.title("Paramètres du planning")
+num_employees = st.sidebar.number_input("Nombre d'employés", min_value=1, value=15)
+start_date = st.sidebar.date_input("Date de début", datetime.date(2025, 11, 2))
+num_weeks = st.sidebar.number_input("Durée de la période (semaines)", 2, 12, 6)
+strict_210 = st.sidebar.checkbox("Appliquer strictement 210h par employé", value=True)
+st.sidebar.subheader("Saisie employés")
+employees = []
+for i in range(num_employees):
+   employees.append(st.sidebar.text_input(f"Employé {i+1}", f"Employé {i+1}"))
+# ---------------------------
+# CONGÉS VALIDÉS
+# ---------------------------
 st.subheader("🛫 Congés validés")
-leave_input = st.text_area("Saisir congés (format: Employé, YYYY-MM-DD, YYYY-MM-DD)")
+leave_input = st.text_area("Saisir congés (format : Employé, YYYY-MM-DD, YYYY-MM-DD)")
 leave_periods = []
 for line in leave_input.splitlines():
    parts = [p.strip() for p in line.split(",")]
@@ -36,10 +39,11 @@ for line in leave_input.splitlines():
        emp, d1, d2 = parts
        leave_periods.append((emp, datetime.date.fromisoformat(d1), datetime.date.fromisoformat(d2)))
 # ---------------------------
-# GÉNÉRATION DU PLANNING
+# GENERATION DU PLANNING
 # ---------------------------
 if st.button("🚀 Générer le planning"):
    model = cp_model.CpModel()
+   num_days = num_weeks * 7
    all_days = [start_date + datetime.timedelta(days=i) for i in range(num_days)]
    shifts = {}
    # Variables binaires
@@ -59,24 +63,24 @@ if st.button("🚀 Générer le planning"):
                    if s != "leave":
                        model.Add(shifts[emp, d, s] == 0)
                model.Add(shifts[emp, d, "leave"] == 1)
-   # Couverture journalière et limites
+   # Couverture journalière
    for d in all_days:
        wd = d.weekday()
-       if wd < 5:  # Lundi–vendredi
+       if wd < 5:  # semaine
            model.Add(sum(shifts[e, d, "day_week"] + shifts[e, d, "short_day"] for e in employees) >= 4)
            model.Add(sum(shifts[e, d, "day_week"] + shifts[e, d, "short_day"] for e in employees) <= 7)
            model.Add(sum(shifts[e, d, "night_week"] for e in employees) == 2)
-       else:  # Samedi–dimanche
+       else:  # week-end
            model.Add(sum(shifts[e, d, "day_weekend"] for e in employees) == 2)
            model.Add(sum(shifts[e, d, "night_weekend"] for e in employees) == 2)
-   # Repos et blocs
+   # Repos et blocs consécutifs
    for e in employees:
        for i, d in enumerate(all_days[:-1]):
            next_d = all_days[i+1]
-           # pas de jour après nuit
+           # Pas de jour après nuit sans repos
            model.Add(shifts[e, d, "night_week"] + shifts[e, d, "night_weekend"] + shifts[e, next_d, "day_week"] <= 1)
            model.Add(shifts[e, d, "night_week"] + shifts[e, d, "night_weekend"] + shifts[e, next_d, "short_day"] <= 1)
-           # max 3 shifts consécutifs
+           # Max 3 shifts consécutifs
            if i < len(all_days)-3:
                model.Add(sum(shifts[e, all_days[i+k], s]
                              for k in range(4)
@@ -89,9 +93,9 @@ if st.button("🚀 Générer le planning"):
            if d.weekday() == 4:  # vendredi nuit
                model.Add(shifts[e, d, "night_weekend"] <= shifts[e, d+datetime.timedelta(days=1), "night_weekend"])
                model.Add(shifts[e, d, "night_weekend"] <= shifts[e, d+datetime.timedelta(days=2), "night_weekend"])
-   # 210h par employé
+   # 210h strictes par employé
    for e in employees:
-       total_hours = sum(shifts[e, d, s]*SHIFT_TYPES[s]["hours"] for d in all_days for s in SHIFT_TYPES)
+       total_hours = sum(shifts[e,d,s]*SHIFT_TYPES[s]["hours"] for d in all_days for s in SHIFT_TYPES)
        if strict_210:
            model.Add(total_hours == 210)
        else:
@@ -113,9 +117,9 @@ if st.button("🚀 Générer le planning"):
                        shifts_summary[e][s] += 1
        st.subheader("📅 Planning")
        st.dataframe(df)
-       st.subheader("⏱️ Heures totales")
+       st.subheader("⏱️ Heures totales par employé")
        st.table(pd.DataFrame.from_dict(hours_summary, orient="index", columns=["Heures"]))
-       st.subheader("⚖️ Répartition des shifts")
+       st.subheader("⚖️ Répartition des shifts par employé")
        st.dataframe(pd.DataFrame(shifts_summary).T)
    else:
        st.error("⚠️ Aucune solution trouvée. Consultez vos contraintes ou levez 210h strictes.")
