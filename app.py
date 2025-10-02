@@ -3,7 +3,13 @@ import streamlit as st
 import pandas as pd
 import datetime
 from ortools.sat.python import cp_model
-
+# ------------------------------
+# PARAMÈTRES INTERFACE
+# ------------------------------
+st.sidebar.title("Paramètres de planification")
+nb_employes = st.sidebar.number_input("Nombre d'employés", min_value=1, max_value=50, value=15, step=1)
+debut_periode = st.sidebar.date_input("Date de début de période", value=datetime.date(2025,11,2))
+nb_semaines = st.sidebar.number_input("Nombre de semaines", min_value=1, max_value=12, value=6, step=1)
 # ------------------------------
 # TYPES DE SHIFT
 # ------------------------------
@@ -18,32 +24,31 @@ shift_types = [JOUR_SEMAINE, NUIT_SEMAINE, WEEKEND_JOUR, WEEKEND_NUIT, SHIFT_COU
 shift_index = {s:i for i,s in enumerate(shift_types)}
 
 # ------------------------------
-# INTERFACE ET PARAMÈTRES
+# GENERATION DES JOURS
 # ------------------------------
-def setup_interface():
-    st.sidebar.title("Paramètres de planification")
-    nb_employes = st.sidebar.number_input("Nombre d'employés", min_value=1, max_value=50, value=15, step=1)
-    debut_periode = st.sidebar.date_input("Date de début de période", value=datetime.date(2025,11,2))
-    nb_semaines = st.sidebar.number_input("Nombre de semaines", min_value=1, max_value=12, value=6, step=1)
-
-    jours = [debut_periode + datetime.timedelta(days=i) for i in range(nb_semaines*7)]
-    num_days = len(jours)
-
-    st.sidebar.subheader("Saisir congés validés")
-    conges_input = {}
-    for i in range(nb_employes):
-       emp = f"E{i+1}"
-       conges_input[emp] = st.sidebar.date_input(
-           label=f"Congés {emp} (Ctrl+clic pour plusieurs dates)",
-           value=[],
-           min_value=debut_periode,
-           max_value=debut_periode + datetime.timedelta(days=num_days-1),
-           key=f"conges_{i}"
-       )
-    return nb_employes, debut_periode, nb_semaines, jours, num_days, conges_input
+jours = [debut_periode + datetime.timedelta(days=i) for i in range(nb_semaines*7)]
+num_days = len(jours) # Get the number of days for easier iteration
 
 # ------------------------------
-# MODELISATION OR-TOOLS (Function)
+# SAISIE CONGÉS VALIDÉS
+# ------------------------------
+st.sidebar.subheader("Saisir congés validés")
+conges_input = {}
+for i in range(nb_employes):
+   emp = f"E{i+1}"
+   conges_input[emp] = st.sidebar.date_input(
+       label=f"Congés {emp} (Ctrl+clic pour plusieurs dates)",
+       value=[],
+       min_value=debut_periode,
+       max_value=debut_periode + datetime.timedelta(days=num_days-1),
+       key=f"conges_{i}"
+   )
+# ------------------------------
+# CREATION DU PLANNING VIDE
+# ------------------------------
+planning = pd.DataFrame(index=[f"E{i+1}" for i in range(nb_employes)], columns=jours)
+# ------------------------------
+# MODELISATION OR-TOOLS
 # ------------------------------
 def build_or_tools_model(nb_employes, num_days, shift_types, shift_index, jours, conges_input):
     model = cp_model.CpModel()
@@ -137,8 +142,11 @@ def build_or_tools_model(nb_employes, num_days, shift_types, shift_index, jours,
 
            # Repos après nuits (If night on day d_idx, then must be repos on day d_idx+1)
            if d_idx < num_days - 1: # Ensure d_idx+1 is within bounds
-                model.AddImplication(shift_is[NUIT_SEMAINE], planning_vars[(e_idx, d_idx + 1)] == shift_index[REPOS])
-                model.AddImplication(shift_is[WEEKEND_NUIT], planning_vars[(e_idx, d_idx + 1)] == shift_index[REPOS])
+                is_next_day_repos = model.NewBoolVar(f'e{e_idx}_d{d_idx+1}_is_repos')
+                model.Add(planning_vars[(e_idx, d_idx + 1)] == shift_index[REPOS]).OnlyEnforceIf(is_next_day_repos)
+                model.Add(planning_vars[(e_idx, d_idx + 1)] != shift_index[REPOS]).OnlyEnforceIf(is_next_day_repos.Not())
+                model.AddImplication(shift_is[NUIT_SEMAINE], is_next_day_repos)
+                model.AddImplication(shift_is[WEEKEND_NUIT], is_next_day_repos)
 
 
            # Deux jours de repos consécutifs par semaine
@@ -196,6 +204,7 @@ def build_or_tools_model(nb_employes, num_days, shift_types, shift_index, jours,
                 is_prev_day_repos = model.NewBoolVar(f'e{e_idx}_d{d_idx-1}_is_repos')
                 model.Add(planning_vars[(e_idx, d_idx - 1)] == shift_index[REPOS]).OnlyEnforceIf(is_prev_day_repos)
                 model.AddImplication(shift_is[WEEKEND_JOUR], is_prev_day_repos)
+
 
            if weekday == 6 and d_idx < num_days - 1: # Sunday and next day exists
                 is_next_day_repos = model.NewBoolVar(f'e{e_idx}_d{d_idx+1}_is_repos')
