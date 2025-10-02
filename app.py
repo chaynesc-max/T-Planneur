@@ -1,7 +1,9 @@
+%%writefile app.py
 import streamlit as st
 import pandas as pd
 import datetime
 from ortools.sat.python import cp_model
+# from ortools.sat.python.cp_model_helper import ortools_variable_extent # Removed problematic import
 
 # ------------------------------
 # TYPES DE SHIFT
