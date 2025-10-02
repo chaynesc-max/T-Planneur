@@ -152,16 +152,19 @@ def build_or_tools_model(nb_employes, num_days, shift_types, shift_index, jours,
                for day_in_week_idx in range(week_start_idx, week_end_idx - 1): # Need at least 2 days remaining
                    # This variable is true if day_in_week_idx and day_in_week_idx+1 are Repos
                    is_two_day_repos = model.NewBoolVar(f'e{e_idx}_two_day_repos_start_d{day_in_week_idx}')
-                   model.AddBoolAnd([planning_vars[(e_idx, day_in_week_idx)] == shift_index[REPOS], planning_vars[(e_idx, day_in_week_idx + 1)] == shift_index[REPOS]]).OnlyEnforceIf(is_two_day_repos)
-                   # Need boolean variables for the negation condition as well
-                   not_repos_day1 = model.NewBoolVar(f'e{e_idx}_d{day_in_week_idx}_not_repos')
-                   not_repos_day2 = model.NewBoolVar(f'e{e_idx}_d{day_in_week_idx+1}_not_repos')
-                   model.Add(planning_vars[(e_idx, day_in_week_idx)] != shift_index[REPOS]).OnlyEnforceIf(not_repos_day1)
-                   model.Add(planning_vars[(e_idx, day_in_week_idx)] == shift_index[REPOS]).OnlyEnforceIf(not_repos_day1.Not())
-                   model.Add(planning_vars[(e_idx, day_in_week_idx+1)] != shift_index[REPOS]).OnlyEnforceIf(not_repos_day2)
-                   model.Add(planning_vars[(e_idx, day_in_week_idx+1)] == shift_index[REPOS]).OnlyEnforceIf(not_repos_day2.Not())
 
-                   model.AddBoolOr([not_repos_day1, not_repos_day2]).OnlyEnforceIf(is_two_day_repos.Not())
+                   # Create boolean variables for the conditions within the AddBoolAnd and AddBoolOr
+                   is_day1_repos = model.NewBoolVar(f'e{e_idx}_d{day_in_week_idx}_is_repos_for_pair')
+                   is_day2_repos = model.NewBoolVar(f'e{e_idx}_d{day_in_week_idx+1}_is_repos_for_pair')
+
+                   model.Add(planning_vars[(e_idx, day_in_week_idx)] == shift_index[REPOS]).OnlyEnforceIf(is_day1_repos)
+                   model.Add(planning_vars[(e_idx, day_in_week_idx)] != shift_index[REPOS]).OnlyEnforceIf(is_day1_repos.Not())
+                   model.Add(planning_vars[(e_idx, day_in_week_idx+1)] == shift_index[REPOS]).OnlyEnforceIf(is_day2_repos)
+                   model.Add(planning_vars[(e_idx, day_in_week_idx+1)] != shift_index[REPOS]).OnlyEnforceIf(is_day2_repos.Not())
+
+                   model.AddBoolAnd([is_day1_repos, is_day2_repos]).OnlyEnforceIf(is_two_day_repos)
+                   model.AddBoolOr([is_day1_repos.Not(), is_day2_repos.Not()]).OnlyEnforceIf(is_two_day_repos.Not())
+
 
                    two_day_repos_starts.append(is_two_day_repos)
 
