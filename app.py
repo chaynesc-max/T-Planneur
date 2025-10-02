@@ -1,15 +1,10 @@
 # app.py
+%%writefile app.py
 import streamlit as st
 import pandas as pd
 import datetime
 from ortools.sat.python import cp_model
-# ------------------------------
-# PARAMÈTRES INTERFACE
-# ------------------------------
-st.sidebar.title("Paramètres de planification")
-nb_employes = st.sidebar.number_input("Nombre d'employés", min_value=1, max_value=50, value=15, step=1)
-debut_periode = st.sidebar.date_input("Date de début de période", value=datetime.date(2025,11,2))
-nb_semaines = st.sidebar.number_input("Nombre de semaines", min_value=1, max_value=12, value=6, step=1)
+
 # ------------------------------
 # TYPES DE SHIFT
 # ------------------------------
@@ -24,31 +19,32 @@ shift_types = [JOUR_SEMAINE, NUIT_SEMAINE, WEEKEND_JOUR, WEEKEND_NUIT, SHIFT_COU
 shift_index = {s:i for i,s in enumerate(shift_types)}
 
 # ------------------------------
-# GENERATION DES JOURS
+# INTERFACE ET PARAMÈTRES
 # ------------------------------
-jours = [debut_periode + datetime.timedelta(days=i) for i in range(nb_semaines*7)]
-num_days = len(jours) # Get the number of days for easier iteration
+def setup_interface():
+    st.sidebar.title("Paramètres de planification")
+    nb_employes = st.sidebar.number_input("Nombre d'employés", min_value=1, max_value=50, value=15, step=1)
+    debut_periode = st.sidebar.date_input("Date de début de période", value=datetime.date(2025,11,2))
+    nb_semaines = st.sidebar.number_input("Nombre de semaines", min_value=1, max_value=12, value=6, step=1)
+
+    jours = [debut_periode + datetime.timedelta(days=i) for i in range(nb_semaines*7)]
+    num_days = len(jours)
+
+    st.sidebar.subheader("Saisir congés validés")
+    conges_input = {}
+    for i in range(nb_employes):
+       emp = f"E{i+1}"
+       conges_input[emp] = st.sidebar.date_input(
+           label=f"Congés {emp} (Ctrl+clic pour plusieurs dates)",
+           value=[],
+           min_value=debut_periode,
+           max_value=debut_periode + datetime.timedelta(days=num_days-1),
+           key=f"conges_{i}"
+       )
+    return nb_employes, debut_periode, nb_semaines, jours, num_days, conges_input
 
 # ------------------------------
-# SAISIE CONGÉS VALIDÉS
-# ------------------------------
-st.sidebar.subheader("Saisir congés validés")
-conges_input = {}
-for i in range(nb_employes):
-   emp = f"E{i+1}"
-   conges_input[emp] = st.sidebar.date_input(
-       label=f"Congés {emp} (Ctrl+clic pour plusieurs dates)",
-       value=[],
-       min_value=debut_periode,
-       max_value=debut_periode + datetime.timedelta(days=num_days-1),
-       key=f"conges_{i}"
-   )
-# ------------------------------
-# CREATION DU PLANNING VIDE
-# ------------------------------
-planning = pd.DataFrame(index=[f"E{i+1}" for i in range(nb_employes)], columns=jours)
-# ------------------------------
-# MODELISATION OR-TOOLS
+# MODELISATION OR-TOOLS (Function)
 # ------------------------------
 def build_or_tools_model(nb_employes, num_days, shift_types, shift_index, jours, conges_input):
     model = cp_model.CpModel()
