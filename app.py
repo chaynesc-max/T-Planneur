@@ -2,12 +2,13 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from ortools.sat.python import cp_model
+import matplotlib.pyplot as plt
 
 # -------------------
 # CONFIGURATION PAGE
 # -------------------
 st.set_page_config(layout="wide")
-st.title("📅 Générateur de Planning Optimisé avec Équité")
+st.title("📅 Générateur de Planning Optimisé avec Équité et Visualisation")
 
 # -------------------
 # PARAMÈTRES
@@ -151,37 +152,27 @@ for e in employes:
 totals = {}
 for e in employes:
     totals[e] = {}
-    totals[e]['Jour semaine'] = model.NewIntVar(0, periode_jours, f"{e}_JourSemaine")
-    totals[e]['Nuit semaine'] = model.NewIntVar(0, periode_jours, f"{e}_NuitSemaine")
-    totals[e]['Jour week-end'] = model.NewIntVar(0, periode_jours, f"{e}_JourWE")
-    totals[e]['Nuit week-end'] = model.NewIntVar(0, periode_jours, f"{e}_NuitWE")
-    totals[e]['Shift court'] = model.NewIntVar(0, periode_jours, f"{e}_ShiftCourt")
+    for t in ['Jour semaine','Nuit semaine','Jour week-end','Nuit week-end','Shift court']:
+        totals[e][t] = model.NewIntVar(0, periode_jours, f"{e}_{t}")
 
 # Calcul des totaux par employé
 for e in employes:
-    # Jour/Nuit semaine
     model.Add(totals[e]['Jour semaine'] == sum(shifts[(e,d,'Jour')] + shifts[(e,d,'Jour_court')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()<=4))
     model.Add(totals[e]['Nuit semaine'] == sum(shifts[(e,d,'Nuit')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()<=4))
-    # Jour/Nuit week-end
     model.Add(totals[e]['Jour week-end'] == sum(shifts[(e,d,'Jour')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()>=5))
     model.Add(totals[e]['Nuit week-end'] == sum(shifts[(e,d,'Nuit')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()>=5))
-    # Shift court
     model.Add(totals[e]['Shift court'] == sum(shifts[(e,d,'Jour_court')] for d in range(periode_jours)))
 
-# Calcul des écarts par type
-avg = {}
-for t in ['Jour semaine','Nuit semaine','Jour week-end','Nuit week-end','Shift court']:
-    avg[t] = sum(totals[e][t] for e in employes) // nb_employes
-
+# Moyenne et écarts
 diff_vars = []
-for e in employes:
-    for t in ['Jour semaine','Nuit semaine','Jour week-end','Nuit week-end','Shift court']:
+for t in ['Jour semaine','Nuit semaine','Jour week-end','Nuit week-end','Shift court']:
+    avg = sum(totals[e][t] for e in employes) // nb_employes
+    for e in employes:
         diff = model.NewIntVar(0, periode_jours, f"diff_{e}_{t}")
-        model.Add(diff >= totals[e][t] - avg[t])
-        model.Add(diff >= avg[t] - totals[e][t])
+        model.Add(diff >= totals[e][t] - avg)
+        model.Add(diff >= avg - totals[e][t])
         diff_vars.append(diff)
 
-# Minimiser la somme des écarts
 model.Minimize(sum(diff_vars))
 
 # -------------------
@@ -212,7 +203,7 @@ else:
     st.error("Aucune solution trouvée dans le temps imparti.")
 
 # -------------------
-# AFFICHAGE
+# AFFICHAGE PLANNING
 # -------------------
 st.subheader("📋 Planning")
 def color_shift(val):
@@ -224,5 +215,17 @@ def color_shift(val):
     return ''
 st.dataframe(planning.style.applymap(color_shift))
 
+# -------------------
+# AFFICHAGE COMPTEURS ET GRAPHIQUE
+# -------------------
 st.subheader("📊 Compteur de shifts par employé")
 st.dataframe(compteur)
+
+# Graphique répartition
+st.subheader("📈 Répartition des shifts par type")
+fig, ax = plt.subplots(figsize=(12,6))
+compteur.plot(kind='bar', stacked=True, ax=ax, colormap='tab20')
+ax.set_ylabel("Nombre de shifts")
+ax.set_xlabel("Employés")
+ax.set_title("Répartition des shifts par type d'employé")
+st.pyplot(fig)
