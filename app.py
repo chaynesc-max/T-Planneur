@@ -64,11 +64,18 @@ for e in employes:
         else:
             model.Add(shifts[(e,d,"Conge")] == 0)
 
+# -------------------
+# CONTRAINTES SPECIFIQUES
+# -------------------
 # Shift court max 1 par employé sur 6 semaines
 for e in employes:
     for block_start in range(0, periode_jours, 42):
         block_end = min(block_start + 42, periode_jours)
         model.Add(sum(shifts[(e,d,"Jour_court")] for d in range(block_start, block_end)) <= 1)
+
+# 1 seul shift court par jour
+for d in range(periode_jours):
+    model.Add(sum(shifts[(e,d,"Jour_court")] for e in employes) <= 1)
 
 # -------------------
 # CONTRAINTES OPÉRATIONNELLES
