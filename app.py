@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from ortools.sat.python import cp_model
 
 st.set_page_config(layout="wide")
-st.title("📅 Générateur de Planning - Version Finale Optimisée")
+st.title("📅 Générateur de Planning - Version Week-end Optimisée")
 
 # -------------------
 # PARAMÈTRES
@@ -47,10 +47,17 @@ leve_210h = st.checkbox("🔓 Lever la contrainte 210h pour résoudre les blocag
 model = cp_model.CpModel()
 shift_types = ["Repos", "Jour", "Nuit", "Jour_court", "Conge"]
 shifts = {}
+weekend_day = {}  # booléen week-end jour
+weekend_night = {}  # booléen week-end nuit
+
 for e in employes:
     for d in range(periode_jours):
         for s in shift_types:
             shifts[(e,d,s)] = model.NewBoolVar(f"{e}_{d}_{s}")
+    # Booléens week-end pour la rotation 1/3
+    for w in range(periode_jours // 7 + 1):
+        weekend_day[(e,w)] = model.NewBoolVar(f"{e}_weekend_day_{w}")
+        weekend_night[(e,w)] = model.NewBoolVar(f"{e}_weekend_night_{w}")
 
 # -------------------
 # CONTRAINTES DE BASE
@@ -91,13 +98,12 @@ for d in range(periode_jours):
         model.Add(sum(shifts[(e,d,"Nuit")] for e in employes) == 2)
 
 # -------------------
-# CONTRAINTES REPOS SIMPLIFIÉES
+# CONTRAINTES REPOS
 # -------------------
 for e in employes:
     # Repos après nuit
     for d in range(periode_jours-1):
         model.Add(shifts[(e,d+1,"Repos")] == 1).OnlyEnforceIf(shifts[(e,d,"Nuit")])
-    
     # Au moins 2 jours off par semaine
     for week_start in range(0, periode_jours, 7):
         week_days = range(week_start, min(week_start+7, periode_jours))
@@ -105,67 +111,38 @@ for e in employes:
         model.Add(sum(off_days) >= 2)
 
 # -------------------
-# BLOCS DE JOURS TRAVAILLÉS
+# LOGIQUE WEEK-END
 # -------------------
 for e in employes:
-    for d in range(periode_jours-2):
-        weekday = (date_debut + timedelta(days=d)).weekday()
-        if weekday <= 4: # Lundi → Vendredi
-            model.AddBoolOr([
-                shifts[(e,d,"Repos")],
-                shifts[(e,d+1,"Repos")],
-                shifts[(e,d+2,"Repos")]
-            ])
-    for d in range(periode_jours-1):
-        weekday = (date_debut + timedelta(days=d)).weekday()
-        if weekday >= 5: # Week-end
-            model.AddBoolOr([
-                shifts[(e,d,"Repos")],
-                shifts[(e,d+1,"Repos")],
-                shifts[(e,d,"Conge")],
-                shifts[(e,d+1,"Conge")]
-            ]).OnlyEnforceIf([shifts[(e,d,"Jour")], shifts[(e,d+1,"Jour")]])
-            model.AddBoolOr([
-                shifts[(e,d,"Repos")],
-                shifts[(e,d+1,"Repos")],
-                shifts[(e,d,"Conge")],
-                shifts[(e,d+1,"Conge")]
-            ]).OnlyEnforceIf([shifts[(e,d,"Nuit")], shifts[(e,d+1,"Nuit")]])
+    for w, week_start in enumerate(range(0, periode_jours, 7)):
+        # index des jours du week-end
+        samedi = week_start + 5
+        dimanche = week_start + 6
+        vendredi = week_start + 4
 
-# -------------------
-# BLOCS DE NUITS
-# -------------------
-for e in employes:
-    for d in range(periode_jours-1):
-        weekday = (date_debut + timedelta(days=d)).weekday()
-        if weekday <= 3: # Lundi → Jeudi
-            model.AddBoolOr([
-                shifts[(e,d,"Repos")],
-                shifts[(e,d+1,"Repos")],
-                shifts[(e,d,"Jour")],
-                shifts[(e,d+1,"Jour")],
-                shifts[(e,d,"Jour_court")],
-                shifts[(e,d+1,"Jour_court")],
-                shifts[(e,d,"Conge")],
-                shifts[(e,d+1,"Conge")]
-            ]).OnlyEnforceIf([shifts[(e,d,"Nuit")], shifts[(e,d+1,"Nuit")]])
-    for d in range(periode_jours-2):
-        weekday = (date_debut + timedelta(days=d)).weekday()
-        if weekday == 4: # Vendredi
-            model.AddBoolOr([
-                shifts[(e,d,"Repos")],
-                shifts[(e,d+1,"Repos")],
-                shifts[(e,d+2,"Repos")],
-                shifts[(e,d,"Jour")],
-                shifts[(e,d+1,"Jour")],
-                shifts[(e,d+2,"Jour")],
-                shifts[(e,d,"Jour_court")],
-                shifts[(e,d+1,"Jour_court")],
-                shifts[(e,d+2,"Jour_court")],
-                shifts[(e,d,"Conge")],
-                shifts[(e,d+1,"Conge")],
-                shifts[(e,d+2,"Conge")]
-            ]).OnlyEnforceIf([shifts[(e,d,"Nuit")], shifts[(e,d+1,"Nuit")], shifts[(e,d+2,"Nuit")]])
+        # Week-end de jour → samedi & dimanche en jour
+        if samedi < periode_jours and dimanche < periode_jours:
+            model.Add(shifts[(e,samedi,"Jour")] + shifts[(e,dimanche,"Jour")] == 2).OnlyEnforceIf(weekend_day[(e,w)])
+            # pas de nuit pendant ce week-end si jour
+            if vendredi < periode_jours:
+                model.Add(shifts[(e,vendredi,"Nuit")] == 0).OnlyEnforceIf(weekend_day[(e,w)])
+            model.Add(shifts[(e,samedi,"Nuit")] == 0).OnlyEnforceIf(weekend_day[(e,w)])
+            model.Add(shifts[(e,dimanche,"Nuit")] == 0).OnlyEnforceIf(weekend_day[(e,w)])
+
+        # Week-end de nuit → vendredi, samedi & dimanche en nuit
+        if vendredi < periode_jours and samedi < periode_jours and dimanche < periode_jours:
+            model.Add(shifts[(e,vendredi,"Nuit")] + shifts[(e,samedi,"Nuit")] + shifts[(e,dimanche,"Nuit")] == 3).OnlyEnforceIf(weekend_night[(e,w)])
+            # pas de jour pendant ce week-end si nuit
+            model.Add(shifts[(e,vendredi,"Jour")] == 0).OnlyEnforceIf(weekend_night[(e,w)])
+            model.Add(shifts[(e,samedi,"Jour")] == 0).OnlyEnforceIf(weekend_night[(e,w)])
+            model.Add(shifts[(e,dimanche,"Jour")] == 0).OnlyEnforceIf(weekend_night[(e,w)])
+
+        # Limiter à 1 week-end actif (jour ou nuit) sur 3 semaines
+        if w % 3 == 0:
+            model.AddBoolOr([weekend_day[(e,w)], weekend_night[(e,w)]])
+        else:
+            model.Add(weekend_day[(e,w)] == 0)
+            model.Add(weekend_night[(e,w)] == 0)
 
 # -------------------
 # HEURES PAR EMPLOYÉ
