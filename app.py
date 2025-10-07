@@ -61,10 +61,17 @@ for e in employes:
             model.Add(shifts[(e,d,"Conge")] == 0)
 
 # -------------------
-# SHIFTS COURTS MAX 1
+# SHIFT COURT MAX 1 PAR EMPLOYÉ SUR 6 SEMAINES
 # -------------------
 for e in employes:
     model.Add(sum(shifts[(e,d,"Jour_court")] for d in range(periode_jours)) <= 1)
+
+# -------------------
+# SHIFT COURT MAX 1 PAR JOUR (LUN-VEN)
+# -------------------
+for d in range(periode_jours):
+    if dates[d].weekday() < 5:
+        model.Add(sum(shifts[(e,d,"Jour_court")] for e in employes) <= 1)
 
 # -------------------
 # STAFFING
@@ -80,7 +87,7 @@ for d in range(periode_jours):
         model.Add(sum(shifts[(e,d,"Nuit")] for e in employes) == 2)
 
 # -------------------
-# REPOS
+# REPOS (au moins 2 jours off par semaine)
 # -------------------
 for e in employes:
     for week_start in range(0, periode_jours, 7):
@@ -108,13 +115,10 @@ for e in employes:
 # WEEK-END ROTATION FLEXIBLE
 # -------------------
 weekend_indices = [i for i,d in enumerate(dates) if d.weekday() == 5]  # samedi
-for idx_e, e in enumerate(employes):
-    week_end_vars = []
-    for w_idx, w in enumerate(weekend_indices):
+for e in employes:
+    for w in weekend_indices:
         weekend_jour = model.NewBoolVar(f"{e}_weekend_{w}_jour")
         weekend_nuit = model.NewBoolVar(f"{e}_weekend_{w}_nuit")
-        week_end_vars.append(weekend_jour)
-        week_end_vars.append(weekend_nuit)
         # max 1 week-end sur 3
         model.Add(weekend_jour + weekend_nuit <= 1)
         # si weekend de jour => samedi et dimanche jour
