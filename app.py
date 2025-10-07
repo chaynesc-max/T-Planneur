@@ -7,7 +7,7 @@ from ortools.sat.python import cp_model
 # CONFIGURATION PAGE
 # -------------------
 st.set_page_config(layout="wide")
-st.title("📅 Générateur de Planning - Version Optimisée avec IntVar")
+st.title("📅 Générateur de Planning Optimisé avec Équité")
 
 # -------------------
 # PARAMÈTRES
@@ -146,34 +146,49 @@ for e in employes:
             model.Add(total_heures_scaled <= int(210*scale_factor))
 
 # -------------------
-# OBJECTIF: ÉQUITÉ
+# OBJECTIF D'ÉQUITÉ
 # -------------------
 totals = {}
-avg_shifts = {"Jour semaine":4*periode_jours//5, "Nuit semaine":2*periode_jours//5,
-              "Jour week-end":periode_jours//3, "Nuit week-end":periode_jours//3}
 for e in employes:
     totals[e] = {}
-    for t in avg_shifts:
-        totals[e][t] = model.NewIntVar(0, periode_jours, f"{e}_{t}")
+    totals[e]['Jour semaine'] = model.NewIntVar(0, periode_jours, f"{e}_JourSemaine")
+    totals[e]['Nuit semaine'] = model.NewIntVar(0, periode_jours, f"{e}_NuitSemaine")
+    totals[e]['Jour week-end'] = model.NewIntVar(0, periode_jours, f"{e}_JourWE")
+    totals[e]['Nuit week-end'] = model.NewIntVar(0, periode_jours, f"{e}_NuitWE")
+    totals[e]['Shift court'] = model.NewIntVar(0, periode_jours, f"{e}_ShiftCourt")
 
-# Calculer les totaux
+# Calcul des totaux par employé
 for e in employes:
-    for d in range(periode_jours):
-        weekday = (date_debut + timedelta(days=d)).weekday()
-        if weekday <= 4: # semaine
-            model.Add(totals[e]["Jour semaine"] == sum(shifts[(e,dd,"Jour")] + shifts[(e,dd,"Jour_court")] 
-                                                       for dd in range(periode_jours) 
-                                                       if (date_debut + timedelta(days=dd)).weekday()<=4))
-            model.Add(totals[e]["Nuit semaine"] == sum(shifts[(e,dd,"Nuit")] for dd in range(periode_jours) if (date_debut + timedelta(days=dd)).weekday()<=4))
-        else:
-            model.Add(totals[e]["Jour week-end"] == sum(shifts[(e,dd,"Jour")] for dd in range(periode_jours) if (date_debut + timedelta(days=dd)).weekday()>=5))
-            model.Add(totals[e]["Nuit week-end"] == sum(shifts[(e,dd,"Nuit")] for dd in range(periode_jours) if (date_debut + timedelta(days=dd)).weekday()>=5))
+    # Jour/Nuit semaine
+    model.Add(totals[e]['Jour semaine'] == sum(shifts[(e,d,'Jour')] + shifts[(e,d,'Jour_court')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()<=4))
+    model.Add(totals[e]['Nuit semaine'] == sum(shifts[(e,d,'Nuit')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()<=4))
+    # Jour/Nuit week-end
+    model.Add(totals[e]['Jour week-end'] == sum(shifts[(e,d,'Jour')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()>=5))
+    model.Add(totals[e]['Nuit week-end'] == sum(shifts[(e,d,'Nuit')] for d in range(periode_jours) if (date_debut + timedelta(days=d)).weekday()>=5))
+    # Shift court
+    model.Add(totals[e]['Shift court'] == sum(shifts[(e,d,'Jour_court')] for d in range(periode_jours)))
+
+# Calcul des écarts par type
+avg = {}
+for t in ['Jour semaine','Nuit semaine','Jour week-end','Nuit week-end','Shift court']:
+    avg[t] = sum(totals[e][t] for e in employes) // nb_employes
+
+diff_vars = []
+for e in employes:
+    for t in ['Jour semaine','Nuit semaine','Jour week-end','Nuit week-end','Shift court']:
+        diff = model.NewIntVar(0, periode_jours, f"diff_{e}_{t}")
+        model.Add(diff >= totals[e][t] - avg[t])
+        model.Add(diff >= avg[t] - totals[e][t])
+        diff_vars.append(diff)
+
+# Minimiser la somme des écarts
+model.Minimize(sum(diff_vars))
 
 # -------------------
 # SOLVEUR
 # -------------------
 solver = cp_model.CpSolver()
-solver.parameters.max_time_in_seconds = 180
+solver.parameters.max_time_in_seconds = 300
 status = solver.Solve(model)
 
 planning = pd.DataFrame("", index=employes, columns=jours_str)
@@ -186,13 +201,13 @@ if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
                 if solver.Value(shifts[(e,d,s)]):
                     planning.iloc[employes.index(e), d] = s
                     day = date_debut + timedelta(days=d)
-                    if s == "Jour":
-                        if day.weekday() <=4: compteur.loc[e,"Jour semaine"] += 1
-                        else: compteur.loc[e,"Jour week-end"] += 1
+                    if s=="Jour":
+                        if day.weekday()<=4: compteur.loc[e,"Jour semaine"]+=1
+                        else: compteur.loc[e,"Jour week-end"]+=1
                     elif s=="Nuit":
-                        if day.weekday()<=4: compteur.loc[e,"Nuit semaine"] +=1
-                        else: compteur.loc[e,"Nuit week-end"] +=1
-                    elif s=="Jour_court": compteur.loc[e,"Shift court"] +=1
+                        if day.weekday()<=4: compteur.loc[e,"Nuit semaine"]+=1
+                        else: compteur.loc[e,"Nuit week-end"]+=1
+                    elif s=="Jour_court": compteur.loc[e,"Shift court"]+=1
 else:
     st.error("Aucune solution trouvée dans le temps imparti.")
 
