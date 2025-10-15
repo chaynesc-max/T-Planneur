@@ -1,181 +1,319 @@
+# planning_streamlit_final.py
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from ortools.sat.python import cp_model
 
 st.set_page_config(layout="wide")
-st.title("📅 Générateur de Planning — Version Finale Optimisée")
+st.title("📅 Générateur de Planning - Final (contrats : 3 consécutifs, weekends, équité, 70h/2sem)")
 
 # -------------------
-# PARAMÈTRES
+# UI - paramètres
 # -------------------
 st.sidebar.header("⚙️ Paramètres")
 nb_employes = st.sidebar.number_input("Nombre d'employés", min_value=5, max_value=50, value=15)
-date_debut = st.sidebar.date_input("Date de début", value=datetime(2025, 11, 2))
-periode_jours = st.sidebar.number_input("Durée de la période (jours)", min_value=7, max_value=84, value=42)
+date_debut = st.sidebar.date_input("Date de début de période", value=datetime(2025, 11, 2))
+periode_jours = st.sidebar.number_input("Durée de la période (jours)", min_value=14, max_value=84, value=42)
+solver_timeout = st.sidebar.number_input("Timeout solveur (s)", min_value=30, max_value=1200, value=300)
+leve_210h = st.sidebar.checkbox("🔓 Lever la contrainte 210h (pour debug)", value=False)
+relax_70h = st.sidebar.checkbox("🔓 Relaxer contrainte 70h sur 2 semaines (<= au lieu de ==)", value=False)
 
-# Employés et dates
+# derived
 employes = [f"Employé {i+1}" for i in range(nb_employes)]
 dates = [date_debut + timedelta(days=i) for i in range(periode_jours)]
-jours_str = [d.strftime("%Y-%m-%d") for d in dates]
+french_weekdays = {'Mon': 'lun','Tue':'mar','Wed':'mer','Thu':'jeu','Fri':'ven','Sat':'sam','Sun':'dim'}
+jours_str = [(d.strftime("%Y-%m-%d") + " (" + french_weekdays[d.strftime('%a')] + ")") for d in dates]
 
 # -------------------
-# CONGÉS
+# Saisie congés (multiselect)
 # -------------------
-st.subheader("📝 Saisie des congés validés")
-conges_dict = {e: [] for e in employes}
+st.subheader("📝 Saisie des congés validés (sélection multiple)")
+conges_dict = {}
 for e in employes:
-    dates_conges = st.date_input(f"Congés {e} (peut être multiple)", min_value=date_debut,
-                                 max_value=date_debut+timedelta(days=periode_jours-1), value=[], key=e)
-    if isinstance(dates_conges, datetime):
-        dates_conges = [dates_conges]
-    conges_dict[e] = dates_conges
+    selected = st.multiselect(
+        f"Congés {e}",
+        options=dates,
+        format_func=lambda x: x.strftime("%Y-%m-%d"),
+        key=f"conges_{e}"
+    )
+    conges_dict[e] = selected
 
-# Bouton générer
-if st.button("Générer le planning"):
+st.markdown("---")
+st.write("Quand les congés sont saisis pour tous les employés, cliquez sur **Générer le planning**.")
 
-    # -------------------
-    # VARIABLES ORTOOLS
-    # -------------------
-    model = cp_model.CpModel()
-    shift_types = ["Repos", "Jour", "Nuit", "Jour_court", "Conge"]
-    shifts = {}
-    for e in employes:
+if not st.button("Générer le planning"):
+    st.stop()
+
+st.info("Optimisation en cours — cela peut prendre un peu de temps selon la taille du problème...")
+
+# -------------------
+# Modèle OR-Tools
+# -------------------
+model = cp_model.CpModel()
+
+shift_types = ["Repos", "Jour", "Nuit", "Jour_court", "Conge"]
+# shifts[(ei,d,shift)]
+shifts = {}
+for ei in range(len(employes)):
+    for d in range(periode_jours):
+        for s in shift_types:
+            shifts[(ei,d,s)] = model.NewBoolVar(f"sh_e{ei}_d{d}_{s}")
+
+# weekend variables (binary) for each saturday index wj
+weekend_indices = [i for i, dt in enumerate(dates) if dt.weekday() == 5]  # samedi
+nb_weekends = len(weekend_indices)
+weekend_vars = {}
+for ei in range(len(employes)):
+    for wj, w in enumerate(weekend_indices):
+        b_j = model.NewBoolVar(f"we_e{ei}_w{wj}_jour")
+        b_n = model.NewBoolVar(f"we_e{ei}_w{wj}_nuit")
+        weekend_vars[(ei,wj)] = (b_j, b_n)
+
+# -------------------
+# CONTRAINTES DE BASE
+# -------------------
+# 1 shift par jour ; congés forcés
+for ei in range(len(employes)):
+    for d in range(periode_jours):
+        model.Add(sum(shifts[(ei,d,s)] for s in shift_types) == 1)
+        if dates[d] in conges_dict[employes[ei]]:
+            model.Add(shifts[(ei,d,"Conge")] == 1)
+        else:
+            model.Add(shifts[(ei,d,"Conge")] == 0)
+
+# shift court max 1 par employé sur 6 semaines
+for ei in range(len(employes)):
+    for block_start in range(0, periode_jours, 42):
+        block_end = min(block_start+42, periode_jours)
+        model.Add(sum(shifts[(ei,d,"Jour_court")] for d in range(block_start, block_end)) <= 1)
+
+# shift court max 1 par jour (lun-ven)
+for d in range(periode_jours):
+    if dates[d].weekday() < 5:
+        model.Add(sum(shifts[(ei,d,"Jour_court")] for ei in range(len(employes))) <= 1)
+
+# -------------------
+# STAFFING
+# -------------------
+for d in range(periode_jours):
+    wd = dates[d].weekday()
+    if wd < 5:  # Lundi-Vendredi
+        model.Add(sum(shifts[(ei,d,"Jour")] + shifts[(ei,d,"Jour_court")] for ei in range(len(employes))) >= 4)
+        model.Add(sum(shifts[(ei,d,"Jour")] + shifts[(ei,d,"Jour_court")] for ei in range(len(employes))) <= 7)
+        model.Add(sum(shifts[(ei,d,"Nuit")] for ei in range(len(employes))) == 2)
+    else:  # Samedi-Dimanche, staffing strict
+        model.Add(sum(shifts[(ei,d,"Jour")] for ei in range(len(employes))) == 2)
+        model.Add(sum(shifts[(ei,d,"Nuit")] for ei in range(len(employes))) == 2)
+
+# -------------------
+# REPOS: au moins 2 jours off par semaine (Repos ou Conge)
+# -------------------
+for ei in range(len(employes)):
+    for week_start in range(0, periode_jours, 7):
+        days = range(week_start, min(week_start+7, periode_jours))
+        model.Add(sum(shifts[(ei,d,"Repos")] + shifts[(ei,d,"Conge")] for d in days) >= 2)
+
+# -------------------
+# REPOS APRÈS NUIT: si nuit -> lendemain Repos (OnlyEnforceIf)
+# -------------------
+for ei in range(len(employes)):
+    for d in range(periode_jours-1):
+        model.Add(shifts[(ei,d+1,"Repos")] == 1).OnlyEnforceIf(shifts[(ei,d,"Nuit")])
+
+# -------------------
+# MAX 3 SHIFTS CONSECUTIFS (quel que soit le type jour/nuit/jour_court)
+# - on crée is_working[ei,d] boolean
+# - sum_{d..d+3} is_working <= 3
+# -------------------
+is_working = {}
+for ei in range(len(employes)):
+    for d in range(periode_jours):
+        wvar = model.NewBoolVar(f"iswork_e{ei}_d{d}")
+        is_working[(ei,d)] = wvar
+        # sum_shifts_work = Jour + Nuit + Jour_court
+        model.Add(shifts[(ei,d,"Jour")] + shifts[(ei,d,"Nuit")] + shifts[(ei,d,"Jour_court")] >= wvar)
+        model.Add(shifts[(ei,d,"Jour")] + shifts[(ei,d,"Nuit")] + shifts[(ei,d,"Jour_court")] <= 3 * wvar)
+        # If Conge or Repos then wvar must be 0 implied by the inequalities
+for ei in range(len(employes)):
+    for d in range(periode_jours - 3):
+        model.Add(sum(is_working[(ei,dd)] for dd in range(d, d+4)) <= 3)
+
+# -------------------
+# WEEK-ENDS : assignation flexible + contiguity (impose les shifts lorsque weekend_jour/nuit = 1)
+# - limiter nb weekends par employé à ceil(nb_weekends/3)
+# -------------------
+max_weekends_per_emp = (nb_weekends + 2) // 3  # ceil
+for ei in range(len(employes)):
+    model.Add(sum(weekend_vars[(ei,wj)][0] + weekend_vars[(ei,wj)][1] for wj in range(nb_weekends)) <= max_weekends_per_emp)
+    for wj, w in enumerate(weekend_indices):
+        b_j, b_n = weekend_vars[(ei,wj)]
+        model.Add(b_j + b_n <= 1)
+        # contiguity for jour
+        model.Add(shifts[(ei,w,"Jour")] == 1).OnlyEnforceIf(b_j)
+        if w+1 < periode_jours:
+            model.Add(shifts[(ei,w+1,"Jour")] == 1).OnlyEnforceIf(b_j)
+        # contiguity for nuit
+        model.Add(shifts[(ei,w,"Nuit")] == 1).OnlyEnforceIf(b_n)
+        if w+1 < periode_jours:
+            model.Add(shifts[(ei,w+1,"Nuit")] == 1).OnlyEnforceIf(b_n)
+        if w-1 >= 0:
+            model.Add(shifts[(ei,w-1,"Nuit")] == 1).OnlyEnforceIf(b_n)
+
+# -------------------
+# HEURES 210h / 6 semaines (scale_factor = 4)
+# - NOTE: nuits du samedi et du dimanche (weekday 5 et 6) NE SONT PAS comptées
+# - Les "Conge" comptent comme journée travaillée
+# -------------------
+scale_factor = 4
+for ei in range(len(employes)):
+    for block_start in range(0, periode_jours, 42):
+        block_end = min(block_start+42, periode_jours)
+        terms = []
+        for d in range(block_start, block_end):
+            # Jour
+            terms.append(int(11.25 * scale_factor) * shifts[(ei,d,"Jour")])
+            # Jour_court
+            terms.append(int(7.5 * scale_factor) * shifts[(ei,d,"Jour_court")])
+            # Conge counts as worked day
+            terms.append(int(11.25 * scale_factor) * shifts[(ei,d,"Conge")])
+            # Nuits: include only if not saturday(5) or sunday(6)
+            if dates[d].weekday() not in (5,6):
+                terms.append(int(11.25 * scale_factor) * shifts[(ei,d,"Nuit")])
+            # else: skip saturday/sunday night
+        total_block = sum(terms)
+        if not leve_210h:
+            model.Add(total_block == int(210 * scale_factor))
+        else:
+            model.Add(total_block <= int(210 * scale_factor))
+
+# -------------------
+# CONTRAINTE SUPPLÉMENTAIRE: Moyenne 70h sur fenêtres glissantes de 14 jours (dimanche->samedi)
+# - On impose pour chaque fenêtre commençant un dimanche: total_hours_window == 70*scale_factor
+# - Si 'relax_70h' est coché on impose <= 70*scale_factor (relaxation)
+# -------------------
+hours_2w_scaled = 70 * scale_factor
+for start in range(periode_jours):
+    if dates[start].weekday() == 6 and start + 13 < periode_jours:  # sunday start, 14-day window exists
+        for ei in range(len(employes)):
+            terms = []
+            for d in range(start, start+14):
+                # add same logic as above for counting hours (exclude sat/sun nights)
+                terms.append(int(11.25 * scale_factor) * shifts[(ei,d,"Jour")])
+                terms.append(int(7.5 * scale_factor) * shifts[(ei,d,"Jour_court")])
+                terms.append(int(11.25 * scale_factor) * shifts[(ei,d,"Conge")])
+                if dates[d].weekday() not in (5,6):
+                    terms.append(int(11.25 * scale_factor) * shifts[(ei,d,"Nuit")])
+            total_win = sum(terms)
+            if relax_70h:
+                model.Add(total_win <= hours_2w_scaled)
+            else:
+                model.Add(total_win == hours_2w_scaled)
+
+# -------------------
+# ÉQUITÉ: minimiser l'écart max-min par catégorie
+# - Catégories: Jour semaine, Nuit semaine, Jour week-end, Nuit week-end, Jour_court (global)
+# - Pour chaque cat: créer total_ei (IntVar), max_cat, min_cat ; contrainte puis minimize sum(max-min)
+# -------------------
+cats = {
+    "Jour_semaine": lambda ei,d: (dates[d].weekday() <= 4, "Jour"),
+    "Nuit_semaine": lambda ei,d: (dates[d].weekday() <= 4, "Nuit"),
+    "Jour_weekend": lambda ei,d: (dates[d].weekday() >= 5, "Jour"),
+    "Nuit_weekend": lambda ei,d: (dates[d].weekday() >= 5, "Nuit"),
+    "Jour_court": lambda ei,d: (True, "Jour_court")
+}
+totals = {cat: [] for cat in cats}
+for cat, condfun in cats.items():
+    for ei in range(len(employes)):
+        tot_var = model.NewIntVar(0, periode_jours, f"tot_{cat}_e{ei}")
+        # build sum expression
+        expr = []
+        for d in range(periode_jours):
+            cond, sh_name = condfun(ei,d)
+            if cond:
+                expr.append(shifts[(ei,d,sh_name)])
+        model.Add(tot_var == sum(expr))
+        totals[cat].append(tot_var)
+# create max/min and diff per category
+diff_cat_vars = []
+for cat in cats:
+    max_var = model.NewIntVar(0, periode_jours, f"max_{cat}")
+    min_var = model.NewIntVar(0, periode_jours, f"min_{cat}")
+    for ei in range(len(employes)):
+        model.Add(max_var >= totals[cat][ei])
+        model.Add(min_var <= totals[cat][ei])
+    diff = model.NewIntVar(0, periode_jours, f"diff_{cat}")
+    model.Add(diff == max_var - min_var)
+    diff_cat_vars.append(diff)
+
+# -------------------
+# OBJECTIF: minimiser la somme des différences (équité)
+# -------------------
+model.Minimize(sum(diff_cat_vars))
+
+# -------------------
+# Solve
+# -------------------
+solver = cp_model.CpSolver()
+solver.parameters.max_time_in_seconds = int(solver_timeout)
+solver.parameters.num_search_workers = 8
+status = solver.Solve(model)
+
+# -------------------
+# Extraction résultats
+# -------------------
+planning = pd.DataFrame("", index=employes, columns=jours_str)
+compteur = pd.DataFrame(0, index=employes, columns=["Jour semaine","Nuit semaine","Jour week-end","Nuit week-end","Shift court","Conge"])
+
+if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    for ei in range(len(employes)):
         for d in range(periode_jours):
             for s in shift_types:
-                shifts[(e,d,s)] = model.NewBoolVar(f"{e}_{d}_{s}")
+                if solver.Value(shifts[(ei,d,s)]):
+                    planning.iat[ei,d] = s
+                    day = dates[d]
+                    if s == "Jour":
+                        if day.weekday() <= 4:
+                            compteur.at[employes[ei],"Jour semaine"] += 1
+                        else:
+                            compteur.at[employes[ei],"Jour week-end"] += 1
+                    elif s == "Nuit":
+                        if day.weekday() <= 3:
+                            compteur.at[employes[ei],"Nuit semaine"] += 1
+                        else:
+                            compteur.at[employes[ei],"Nuit week-end"] += 1
+                    elif s == "Jour_court":
+                        compteur.at[employes[ei],"Shift court"] += 1
+                    elif s == "Conge":
+                        compteur.at[employes[ei],"Conge"] += 1
+else:
+    st.error("Aucune solution trouvée. Essaie d'augmenter le timeout ou de décocher 'Lever la contrainte 210h' / 'Relaxer 70h'.")
 
-    # -------------------
-    # CONTRAINTES DE BASE
-    # -------------------
-    for e in employes:
-        for d in range(periode_jours):
-            # Un seul shift par jour
-            model.Add(sum(shifts[(e,d,s)] for s in shift_types) == 1)
-            # Congés pris en compte
-            if dates[d] in conges_dict[e]:
-                model.Add(shifts[(e,d,"Conge")] == 1)
-            else:
-                model.Add(shifts[(e,d,"Conge")] == 0)
+# -------------------
+# Affichage
+# -------------------
+st.subheader("📋 Planning généré")
+def color_shift(val):
+    if val == "Jour": return 'background-color: #a6cee3'
+    if val == "Nuit": return 'background-color: #1f78b4; color:white'
+    if val == "Jour_court": return 'background-color: #b2df8a'
+    if val == "Conge": return 'background-color: #fb9a99'
+    if val == "Repos": return 'background-color: #f0f0f0'
+    return ''
+st.dataframe(planning.style.applymap(color_shift))
 
-    # -------------------
-    # SHIFT COURT
-    # -------------------
-    for e in employes:
-        # Max 1 shift court sur 6 semaines
-        for block_start in range(0, periode_jours, 42):
-            block_end = min(block_start+42, periode_jours)
-            model.Add(sum(shifts[(e,d,"Jour_court")] for d in range(block_start, block_end)) <= 1)
-    for d in range(periode_jours):
-        if dates[d].weekday() < 5:
-            # Max 1 shift court par jour
-            model.Add(sum(shifts[(e,d,"Jour_court")] for e in employes) <= 1)
+st.subheader("📊 Compteurs et vérifications")
+st.dataframe(compteur)
 
-    # -------------------
-    # STAFFING JOUR ET NUIT
-    # -------------------
-    for d in range(periode_jours):
-        wd = dates[d].weekday()
-        if wd < 5:
-            # Lundi à vendredi
-            model.Add(sum(shifts[(e,d,"Jour")] + shifts[(e,d,"Jour_court")] for e in employes) >= 5)
-            model.Add(sum(shifts[(e,d,"Jour")] + shifts[(e,d,"Jour_court")] for e in employes) <= 7)
-            model.Add(sum(shifts[(e,d,"Nuit")] for e in employes) == 2 if wd <= 3 else 2)  # Lundi-Jeudi
-        else:
-            # Samedi-Dimanche
-            model.Add(sum(shifts[(e,d,"Jour")] for e in employes) >= 2)
-            model.Add(sum(shifts[(e,d,"Jour")] for e in employes) <= 3)
-            if wd == 5:  # samedi
-                model.Add(sum(shifts[(e,d,"Nuit")] + shifts[(e,d+1 if d+1<periode_jours else d,"Nuit")] for e in employes) >= 2)
-                model.Add(sum(shifts[(e,d,"Nuit")] + shifts[(e,d+1 if d+1<periode_jours else d,"Nuit")] for e in employes) <= 3)
+# affichage supplémentaire : totaux weekend jugés par employé
+we_summary = []
+for ei in range(len(employes)):
+    wj = sum(int(solver.Value(weekend_vars[(ei,wj)][0])) for wj in range(nb_weekends))
+    wn = sum(int(solver.Value(weekend_vars[(ei,wj)][1])) for wj in range(nb_weekends))
+    we_summary.append({"employe": employes[ei], "weekend_jour": wj, "weekend_nuit": wn})
+st.write(pd.DataFrame(we_summary))
 
-    # -------------------
-    # REPOS 2 jours minimum par semaine
-    # -------------------
-    for e in employes:
-        for week_start in range(0, periode_jours, 7):
-            days = range(week_start, min(week_start+7, periode_jours))
-            model.Add(sum(shifts[(e,d,"Repos")] + shifts[(e,d,"Conge")] for d in days) >= 2)
-
-    # -------------------
-    # MAX 3 SHIFTS CONSÉCUTIFS
-    # -------------------
-    for e in employes:
-        for d in range(periode_jours-3):
-            model.Add(sum(shifts[(e,dd,"Jour")] + shifts[(e,dd,"Nuit")] + shifts[(e,dd,"Jour_court")]
-                          for dd in range(d,d+4)) <= 3)
-
-    # -------------------
-    # WEEKEND CONTIGU
-    # -------------------
-    for e in employes:
-        for d in range(periode_jours):
-            wd = dates[d].weekday()
-            # Weekend de jour : samedi & dimanche
-            if wd == 5 and d+1<periode_jours:
-                model.AddImplication(shifts[(e,d,"Jour")], shifts[(e,d+1,"Jour")])
-                model.AddImplication(shifts[(e,d+1,"Jour")], shifts[(e,d,"Jour")])
-            # Weekend de nuit : vendredi-samedi-dimanche
-            if wd == 4 and d+2<periode_jours:
-                model.AddImplication(shifts[(e,d,"Nuit")], shifts[(e,d+1,"Nuit")])
-                model.AddImplication(shifts[(e,d,"Nuit")], shifts[(e,d+2,"Nuit")])
-            if wd == 5 and d+1<periode_jours:
-                model.AddImplication(shifts[(e,d,"Nuit")], shifts[(e,d+1,"Nuit")])
-                model.AddImplication(shifts[(e,d+1,"Nuit")], shifts[(e,d,"Nuit")])
-
-    # -------------------
-    # HEURES 210 ±10%
-    # -------------------
-    sf = 4
-    min_h = int(198.75*sf)
-    max_h = int(221.25*sf)
-    for e in employes:
-        total = sum(int(11.25*sf)*shifts[(e,d,"Jour")] +
-                    int(7.5*sf)*shifts[(e,d,"Jour_court")] +
-                    int(11.25*sf)*shifts[(e,d,"Conge")] +
-                    (int(11.25*sf)*shifts[(e,d,"Nuit")] if dates[d].weekday()<5 else 0)
-                    for d in range(periode_jours))
-        model.Add(total >= min_h)
-        model.Add(total <= max_h)
-
-    # -------------------
-    # SOLVEUR
-    # -------------------
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 180
-    status = solver.Solve(model)
-
-    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        # Planning DataFrame
-        planning = pd.DataFrame("", index=employes, columns=jours_str)
-        compteur = pd.DataFrame(0, index=employes, columns=["Jour semaine","Nuit semaine","Jour weekend","Nuit weekend","Shift court"])
-        for e in employes:
-            for d in range(periode_jours):
-                for s in shift_types:
-                    if solver.Value(shifts[(e,d,s)]):
-                        planning.loc[e, jours_str[d]] = s
-                        day = dates[d]
-                        if s=="Jour":
-                            if day.weekday()<5: compteur.loc[e,"Jour semaine"] +=1
-                            else: compteur.loc[e,"Jour weekend"] +=1
-                        elif s=="Nuit":
-                            if day.weekday()<5: compteur.loc[e,"Nuit semaine"] +=1
-                            else: compteur.loc[e,"Nuit weekend"] +=1
-                        elif s=="Jour_court":
-                            compteur.loc[e,"Shift court"] +=1
-        # -------------------
-        # AFFICHAGE
-        # -------------------
-        def color_shift(val):
-            if val=="Jour": return 'background-color: #a6cee3'
-            elif val=="Nuit": return 'background-color: #1f78b4; color:white'
-            elif val=="Jour_court": return 'background-color: #b2df8a'
-            elif val=="Conge": return 'background-color: #fb9a99'
-            elif val=="Repos": return 'background-color: #f0f0f0'
-            return ''
-        st.subheader("📋 Planning")
-        st.dataframe(planning.style.applymap(color_shift))
-        st.subheader("📊 Compteur de shifts")
-        st.dataframe(compteur)
-    else:
-        st.error("Aucune solution trouvée. Vérifier les contraintes et les congés.")
+st.write("✅ Remarques :")
+st.write("- Les nuits du samedi et du dimanche ont été exclues du calcul des 210h (la nuit de vendredi compte).")
+st.write("- Les week-ends sont pris en compte dans la rotation et la planification (contiguïté imposée).")
+st.write("- Max 3 jours travaillés consécutifs (tous types confondus) est appliqué.")
+st.write("- Les fenêtres de 14 jours débutent les dimanches ; si 'Relaxer 70h' est décochée, la contrainte ==70h est imposée, sinon <=70h.")
