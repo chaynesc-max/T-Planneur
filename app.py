@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from ortools.sat.python import cp_model
 
 st.set_page_config(layout="wide")
-st.title("📅 Générateur de Planning — Staffing & 210h (198.75–221.25)")
+st.title("📅 Générateur de Planning")
 
 # -------------------
 # Paramètres UI
